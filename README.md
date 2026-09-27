@@ -2,6 +2,8 @@
 
 **jeva.cpp** is a fork of llama.cpp that adds a [JEV-compatible decision API](docs/jeva.md) to `llama-server`, enabling Choice, Score and Noul evaluations directly from model logits while preserving standard autoregressive generation.
 
+jeva.cpp is designed to work with all models and platforms supported by llama.cpp, reusing its existing model implementations and inference backends. The JEV decision API requires models that provide next-token vocabulary logits; other model types retain their original functionality.
+
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
 <div align="center">
