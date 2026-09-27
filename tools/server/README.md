@@ -9,6 +9,7 @@ Set of LLM REST APIs and a web UI to interact with llama.cpp.
  * [OpenAI API](https://github.com/openai/openai-openapi) compatible chat completions, responses, and embeddings routes
  * [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) compatible chat completions
  * Reranking endpoint (https://github.com/ggml-org/llama.cpp/pull/9510)
+ * [JEV-compatible decisions](../../docs/jeva.md) through `POST /v1/systemone` (jeva.cpp)
  * Parallel decoding with multi-user support
  * Continuous batching
  * Multimodal ([documentation](../../docs/multimodal.md)) / with OpenAI-compatible API support

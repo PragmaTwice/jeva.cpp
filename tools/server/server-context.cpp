@@ -1,5 +1,6 @@
 #include "server-context.h"
 #include "server-chat.h"
+#include "server-jev.h"
 #include "server-common.h"
 #include "server-http.h"
 #include "server-task.h"
@@ -449,7 +450,10 @@ struct server_slot {
     bool can_batch_with(server_slot & other_slot) const {
         GGML_ASSERT(task);
 
-        return task->type == other_slot.task->type
+        const bool logits_only = task->need_logits() && other_slot.task->need_logits()
+            && (!task->need_sampling() || !other_slot.task->need_sampling());
+
+        return (task->type == other_slot.task->type || logits_only)
             && inp_embd.size() == other_slot.inp_embd.size()
             && are_lora_equal(lora, other_slot.lora);
     }
@@ -1636,8 +1640,7 @@ private:
         if (ret) {
             update_cache = update_cache && prompt_cache;
 
-            // cache prompts only for completion tasks
-            update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
+            update_cache = update_cache && (task.type == SERVER_TASK_TYPE_COMPLETION || task.type == SERVER_TASK_TYPE_JEV);
 
             if (update_cache) {
                 SRV_TRC("%s", "updating prompt cache\n");
@@ -1773,6 +1776,19 @@ private:
         if (!task.tokens.validate(ctx_tgt)) {
             send_error(task, "Prompt contains invalid tokens", ERROR_TYPE_INVALID_REQUEST);
             return false;
+        }
+
+        if (task.type == SERVER_TASK_TYPE_JEV) {
+            if (task.candidate_tokens.empty()) {
+                send_error(task, "Decision candidates must not be empty", ERROR_TYPE_INVALID_REQUEST);
+                return false;
+            }
+            for (llama_token token : task.candidate_tokens) {
+                if (token < 0 || token >= llama_vocab_n_tokens(vocab)) {
+                    send_error(task, "Decision candidate is outside the vocabulary", ERROR_TYPE_INVALID_REQUEST);
+                    return false;
+                }
+            }
         }
 
         SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
@@ -2225,6 +2241,22 @@ private:
         queue_results.send(std::move(res));
     }
 
+    void send_jev(const server_slot & slot, int32_t i_batch) {
+        const float * logits = llama_get_logits_ith(ctx_tgt, i_batch);
+        if (!logits) {
+            send_error(slot, "Model did not return decision logits", ERROR_TYPE_SERVER);
+            return;
+        }
+        auto res = std::make_unique<server_task_result_jev>();
+        res->id       = slot.task->id;
+        res->index    = slot.task->index;
+        res->n_tokens = slot.task->n_tokens();
+        for (llama_token token : slot.task->candidate_tokens) {
+            res->logits.push_back(logits[token]);
+        }
+        queue_results.send(std::move(res));
+    }
+
     //
     // Functions to process the task
     //
@@ -2384,6 +2416,7 @@ private:
             case SERVER_TASK_TYPE_INFILL:
             case SERVER_TASK_TYPE_EMBEDDING:
             case SERVER_TASK_TYPE_RERANK:
+            case SERVER_TASK_TYPE_JEV:
                 {
                     // special case: if input is provided via CLI, tokenize it first
                     // otherwise, no need to tokenize as it's already done inside the HTTP thread
@@ -3459,8 +3492,7 @@ private:
 
                     bool do_checkpoint = params_base.n_ctx_checkpoints > 0;
 
-                    // make checkpoints only for completion tasks
-                    do_checkpoint = do_checkpoint && slot.task->type == SERVER_TASK_TYPE_COMPLETION;
+                    do_checkpoint = do_checkpoint && (slot.task->type == SERVER_TASK_TYPE_COMPLETION || slot.task->type == SERVER_TASK_TYPE_JEV);
 
                     // make a checkpoint of the parts of the memory that cannot be rolled back.
                     // checkpoints are created only if:
@@ -3816,6 +3848,14 @@ private:
             }
 
             if (slot.state == SLOT_STATE_DONE_PROMPT) {
+                if (slot.task->type == SERVER_TASK_TYPE_JEV) {
+                    send_jev(slot, slot.i_batch - off);
+                    slot.stats.update_prompt_last();
+                    slot.release();
+                    slot.i_batch = -1;
+                    return;
+                }
+
                 if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
                     // prompt evaluated for embedding
                     send_embedding(slot, batch_view);
@@ -5142,6 +5182,48 @@ void server_routes::init_routes() {
 
     this->post_embeddings_oai = [this](const server_http_req & req) {
         return handle_embeddings_impl(req, TASK_RESPONSE_TYPE_OAI_EMBD);
+    };
+
+    this->post_systemone = [this](const server_http_req & req) {
+        auto res = create_response();
+        if (params.embedding || meta->pooling_type != LLAMA_POOLING_TYPE_NONE || !llama_model_has_decoder(ctx_server.model_tgt)) {
+            res->error(format_error_response("System One requires a model with next-token logits in generation mode", ERROR_TYPE_NOT_SUPPORTED));
+            return res;
+        }
+
+        server_jev_request request;
+        try {
+            request = server_jev_parse(json::parse(req.body), meta->chat_params, ctx_server.vocab);
+            for (auto & task : request.tasks) {
+                task.id = res->rd.get_new_id();
+            }
+        } catch (const std::exception & e) {
+            auto error = format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST);
+            error["code"] = 422;
+            res->error(error);
+            return res;
+        }
+        res->rd.post_tasks(std::move(request.tasks));
+        auto results = res->rd.wait_for_all(req.should_stop);
+        if (results.is_terminated) {
+            return res;
+        }
+        if (results.error) {
+            res->error(results.error->to_json());
+            return res;
+        }
+
+        json answers = json::object();
+        int64_t input_tokens = 0;
+        for (size_t i = 0; i < results.results.size(); ++i) {
+            const auto * result = dynamic_cast<const server_task_result_jev *>(results.results[i].get());
+            GGML_ASSERT(result);
+            const auto & question = request.questions[i];
+            answers[question.id] = question.answer(result->logits);
+            input_tokens += result->n_tokens;
+        }
+        res->ok(json {{"model", meta->model_name}, {"answers", answers}, {"usage", {{"input_tokens", input_tokens}, {"output_tokens", 0}}}});
+        return res;
     };
 
     this->post_rerank = [this](const server_http_req & req) {

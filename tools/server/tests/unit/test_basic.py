@@ -1,6 +1,7 @@
 import pytest
 import requests
 import socket
+import math
 from utils import *
 
 server = ServerPreset.tinyllama2()
@@ -17,6 +18,110 @@ def test_server_start_simple():
     server.start()
     res = server.make_request("GET", "/health")
     assert res.status_code == 200
+
+
+@pytest.mark.parametrize("kv_unified,jinja", [(False, False), (True, True)])
+def test_systemone_questions(kv_unified, jinja):
+    server.n_ctx = 2048
+    server.n_batch = 32
+    server.n_ubatch = 16
+    server.kv_unified = kv_unified
+    server.jinja = jinja
+    server.start()
+    questions = {
+        "department": {"type": "choice", "instructions": "Which department?", "criteria": {
+            "billing": None, "support": {"description": "Product help", "examples": ["broken", None]},
+        }},
+        "severity": {"type": "score", "instructions": {"question": "How serious?"}, "criteria": ["minor", ["major", "blocking"]]},
+        "urgent": {"type": "noul", "instructions": "Is it urgent?", "criteria": {"true": "Time sensitive"}},
+        "only": {"type": "choice", "criteria": {"the only option": None}},
+    }
+    state = {"message": "The product is broken", "history": [None, {"attempts": 2, "resolved": False}]}
+    res = server.make_request("POST", "/v1/systemone", data={"state": state, "questions": questions})
+    assert res.status_code == 200, res.body
+    assert res.body["model"] == server.model_alias
+    assert res.body["usage"]["input_tokens"] > 0
+    assert res.body["usage"]["output_tokens"] == 0
+    answers = res.body["answers"]
+    assert answers.keys() == questions.keys()
+    assert set(answers["department"]["probabilities"]) == {"billing", "support"}
+    assert answers["department"]["choice"] == max(answers["department"]["probabilities"], key=answers["department"]["probabilities"].get)
+    assert answers["severity"]["legend"] == {"0": "minor", "1": ["major", "blocking"]}
+    assert answers["severity"]["score"] == pytest.approx(answers["severity"]["probabilities"]["1"])
+    assert 0 <= answers["urgent"]["noul"] <= 1
+    assert set(answers["urgent"]) == {"type", "noul"}
+    assert answers["only"]["probabilities"] == {"the only option": 1.0}
+    assert answers["only"]["confidence"] == 1.0
+
+    # Each question must give the same distribution alone, under a different ID, and after cache reuse.
+    for name, question in questions.items():
+        for _ in range(2):
+            single = server.make_request("POST", "/v1/systemone", data={"state": state, "questions": {"renamed": question}})
+            assert single.status_code == 200, single.body
+            answer = single.body["answers"]["renamed"]
+            if question["type"] == "noul":
+                assert answer["noul"] == pytest.approx(answers[name]["noul"], abs=1e-3)
+            else:
+                probs = answer["probabilities"]
+                assert all(math.isfinite(p) and 0 <= p <= 1 for p in probs.values())
+                assert sum(probs.values()) == pytest.approx(1.0)
+                assert probs == pytest.approx(answers[name]["probabilities"], abs=1e-3)
+                assert 0 <= answer["confidence"] <= 1
+
+
+def test_systemone_validation():
+    server.n_ctx = 2048
+    server.start()
+    invalid = [
+        {},
+        {"state": None, "questions": {"q": {"type": "noul"}}},
+        {"state": "text", "questions": {}},
+        {"state": "text", "questions": []},
+        {"state": "text", "model": 123, "questions": {"q": {"type": "noul"}}},
+        {"state": "text", "stream": True, "questions": {"q": {"type": "noul"}}},
+    ]
+    for question in [
+        {"type": "unknown"}, {"type": "choice", "criteria": {}},
+        {"type": "choice", "criteria": {str(i): None for i in range(256)}},
+        {"type": "choice", "criteria": {"bad": 7}},
+        {"type": "score", "criteria": ["only"]},
+        {"type": "score", "criteria": ["level"] * 11},
+        {"type": "noul", "criteria": {"yes": "wrong key"}},
+        {"type": "noul", "instructions": False},
+    ]:
+        invalid.append({"state": "text", "questions": {"q": question}})
+    for body in invalid:
+        res = server.make_request("POST", "/v1/systemone", data=body)
+        assert res.status_code == 422, (body, res.body)
+        assert "error" in res.body
+
+    res = server.make_request("POST", "/v1/systemone", data={"state": "long " * 2000, "questions": {"q": {"type": "noul"}}})
+    assert res.status_code == 400
+    res = server.make_request("POST", "/completion", data={"prompt": "Hello", "n_predict": 4})
+    assert res.status_code == 200
+    assert res.body["timings"]["predicted_n"] == 4
+
+
+@pytest.mark.parametrize("backend_sampling", [False, True])
+def test_systemone_during_generation(backend_sampling):
+    server.n_ctx = 4096
+    server.n_predict = 128
+    server.server_continuous_batching = True
+    server.backend_sampling = backend_sampling
+    server.start()
+    generation = {"prompt": "Once upon a time", "n_predict": 128, "temperature": 0, "return_tokens": True, "cache_prompt": False, "ignore_eos": True}
+    expected = server.make_request("POST", "/completion", data=generation)
+    assert expected.status_code == 200
+    decision = {"state": "The sky is blue.", "questions": {"q": {"type": "noul", "instructions": "Is the sky blue?"}}}
+    expected_decision = server.make_request("POST", "/v1/systemone", data=decision)
+    assert expected_decision.status_code == 200
+    results = parallel_function_calls([
+        (server.make_request, ("POST", "/completion", generation)),
+        (server.make_request, ("POST", "/v1/systemone", decision)),
+    ])
+    assert all(r is not None and r.status_code == 200 for r in results)
+    assert results[0].body["tokens"] == expected.body["tokens"]
+    assert results[1].body["answers"]["q"]["noul"] == pytest.approx(expected_decision.body["answers"]["q"]["noul"], abs=1e-3)
 
 
 def test_server_multiple_addresses(monkeypatch):

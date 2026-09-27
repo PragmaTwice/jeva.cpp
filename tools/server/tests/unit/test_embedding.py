@@ -30,6 +30,15 @@ def test_embedding_single():
     assert abs(sum([x ** 2 for x in res.body['data'][0]['embedding']]) - 1) < EPSILON
 
 
+def test_embedding_after_systemone_rejection():
+    server.start()
+    res = server.make_request("POST", "/v1/systemone", data={"state": "text", "questions": {"q": {"type": "noul"}}})
+    assert res.status_code == 501
+    res = server.make_request("POST", "/v1/embeddings", data={"input": "text"})
+    assert res.status_code == 200
+    assert len(res.body["data"][0]["embedding"]) > 1
+
+
 def test_embedding_multiple():
     global server
     server.pooling = 'last'

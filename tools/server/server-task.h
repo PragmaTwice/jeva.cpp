@@ -27,6 +27,7 @@ enum server_task_type {
     SERVER_TASK_TYPE_SLOT_ERASE,
     SERVER_TASK_TYPE_GET_LORA,
     SERVER_TASK_TYPE_SET_LORA,
+    SERVER_TASK_TYPE_JEV,
 };
 
 // TODO: change this to more generic "response_format" to replace the "format_response_*" in server-common
@@ -152,6 +153,7 @@ struct server_task {
     // used by SERVER_TASK_TYPE_INFERENCE
     task_params   params;
     server_tokens tokens;
+    llama_tokens candidate_tokens; // used by SERVER_TASK_TYPE_JEV
 
     // only used by CLI, this allow tokenizing CLI inputs on server side
     // we need this because mtmd_context and vocab are not accessible outside of server_context
@@ -197,6 +199,7 @@ struct server_task {
         switch (type) {
             case SERVER_TASK_TYPE_COMPLETION:
             case SERVER_TASK_TYPE_INFILL:
+            case SERVER_TASK_TYPE_JEV:
                 return true;
             default:
                 return false;
@@ -470,6 +473,13 @@ struct server_task_result_rerank : server_task_result {
     float score = -1e6;
 
     int32_t n_tokens;
+
+    virtual json to_json() override;
+};
+
+struct server_task_result_jev : server_task_result {
+    std::vector<float> logits;
+    int32_t n_tokens = 0;
 
     virtual json to_json() override;
 };

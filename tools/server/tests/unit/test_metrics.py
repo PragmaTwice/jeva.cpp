@@ -123,6 +123,33 @@ def test_metrics_predicted_total_matches_requests():
     assert metrics["llamacpp:tokens_predicted_total"][1] == n_predicted
 
 
+@pytest.mark.parametrize("backend_sampling", [False, True])
+def test_systemone_cache_and_generation(backend_sampling):
+    server.n_ctx = 1024
+    server.n_slots = 1
+    server.backend_sampling = backend_sampling
+    server.start()
+    generation = {"prompt": "Once upon a time", "n_predict": 8, "temperature": 0, "return_tokens": True, "cache_prompt": False}
+    before = server.make_request("POST", "/completion", data=generation)
+    assert before.status_code == 200
+    initial = parse_metrics(fetch_metrics(server))
+    request = {"state": "The sky is blue.", "questions": {"q": {"type": "noul", "instructions": "Is the sky blue?"}}}
+    first = server.make_request("POST", "/v1/systemone", data=request)
+    assert first.status_code == 200, first.body
+    cold = parse_metrics(fetch_metrics(server))
+    second = server.make_request("POST", "/v1/systemone", data=request)
+    assert second.status_code == 200, second.body
+    warm = parse_metrics(fetch_metrics(server))
+    assert second.body["usage"] == first.body["usage"]
+    assert second.body["answers"]["q"]["noul"] == pytest.approx(first.body["answers"]["q"]["noul"], abs=1e-3)
+    assert warm["llamacpp:prompt_tokens_cached_total"][1] > cold["llamacpp:prompt_tokens_cached_total"][1]
+    assert warm["llamacpp:prompt_tokens_total"][1] - cold["llamacpp:prompt_tokens_total"][1] == 1
+    assert warm["llamacpp:tokens_predicted_total"] == initial["llamacpp:tokens_predicted_total"]
+    after = server.make_request("POST", "/completion", data=generation)
+    assert after.status_code == 200
+    assert after.body["tokens"] == before.body["tokens"]
+
+
 def test_metrics_generation_rate_excludes_first_token():
     global server
     server.start()
