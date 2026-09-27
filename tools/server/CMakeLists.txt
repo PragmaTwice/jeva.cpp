@@ -2,6 +2,11 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 
 # server-context containing the core server logic, used by llama-server and CLI
 
+set(JEV_TEMPLATE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/templates/jev-default.jinja")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${JEV_TEMPLATE_FILE}")
+file(READ "${JEV_TEMPLATE_FILE}" JEV_TEMPLATE)
+configure_file(server-jev-template.h.in server-jev-template.h @ONLY)
+
 set(TARGET server-context)
 
 add_library(${TARGET} STATIC

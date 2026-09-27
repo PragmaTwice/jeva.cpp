@@ -52,6 +52,61 @@ The response contains `model`, `answers` keyed by question ID, and `usage`. `usa
 
 Unsupported request fields are rejected rather than silently ignored. Streaming, per-request sampling parameters, tools and media are not implemented. Invalid request bodies return HTTP 422. Context overflow and inference errors use the existing server errors. One failing question fails the request and cancels remaining work.
 
+## Decision templates
+
+JEV renders a decision content template into one user message, then applies the model's existing chat template. The [default decision template](../tools/server/templates/jev-default.jinja) is embedded in the binary and preserves the original JEV prompt, including JSON formatting. It does not require a template file at runtime.
+
+Use these server options to customize decision prompts:
+
+| Option | Environment variable | Purpose |
+| --- | --- | --- |
+| `--jev-template-file PATH` | `LLAMA_ARG_JEV_TEMPLATE_FILE` | Load a Jinja content template from a UTF-8 file |
+| `--jev-template SOURCE` | `LLAMA_ARG_JEV_TEMPLATE` | Set an inline Jinja content template |
+| `--jev-template-kwargs JSON` | `LLAMA_ARG_JEV_TEMPLATE_KWARGS` | Set an object available as `params` in the template; default `{}` |
+| `--jev-answer-prefix STRING` | `LLAMA_ARG_JEV_ANSWER_PREFIX` | Set the answer prefix; default `Answer:` |
+
+These options also work in model INI presets. Use one template source per configuration. Router CLI options override model presets, following the existing router behavior. The HTTP request format is unchanged.
+
+The template context contains:
+
+| Variable | Value |
+| --- | --- |
+| `state` | The request's string, object or array |
+| `state_json` | The state serialized with the server's JSON serializer |
+| `question.type` | `choice`, `score` or `noul` |
+| `question.instructions`, `question.criteria` | The current question's data; missing instructions are null and missing Noul criteria become an empty object |
+| `question.instructions_json`, `question.criteria_json` | Serialized versions of those values |
+| `options` | Ordered list of objects with `label`, `name`, `description` and `json` |
+| `options[i].json` | Serialized object containing that option's `name` and `description` |
+| `params` | The object supplied with `--jev-template-kwargs` |
+| `answer_prefix` | The configured answer prefix, for reference in instructions |
+
+Question IDs and other questions are not exposed to the template. Options and their labels are assigned by the server; display those labels without changing their association with the options. Prefer the serialized fields when including JSON verbatim. The Jinja engine's `tojson` filter has different formatting and can round floating-point values.
+
+For example, save this as `decision.jinja`:
+
+```jinja
+{{ params.instruction }}
+State: {{ state_json }}
+Question: {{ question.instructions_json }}
+{% for option in options %}
+{{ option.label }}: {{ option.json }}
+{% endfor %}
+```
+
+```sh
+./build/bin/llama-server -m model.gguf \
+  --jev-template-file decision.jinja \
+  --jev-template-kwargs '{"instruction":"Choose the best option. Reply with its label only."}' \
+  --jev-answer-prefix 'Decision:'
+```
+
+The content template runs before the model's chat template. Do not include model role markers or append the answer prefix to the content: the server adds the prefix after chat formatting. It validates candidate tokens against the configured prefix, so changing the prefix can change the available labels and their capacity. No candidate is sampled or generated.
+
+Content templates always use the existing C++ Jinja engine. `--jinja` / `--no-jinja` still controls the outer chat template. JEV template variables are separate from `--chat-template-kwargs`, and JEV configuration does not change ordinary chat or completion prompts.
+
+Templates are compiled once during server initialization, with separate rendering contexts for concurrent requests. Syntax errors fail initialization; rendering errors return HTTP 500 without falling back to the default template. Invalid JEV requests still return HTTP 422. Editing a file requires restarting the server; sleep and wake reuse the loaded template. Keep the shared state before question-specific content to preserve prompt-prefix cache reuse.
+
 ## Scoring and compatibility
 
 The tokenizer maps option labels to distinct existing tokens. Each label must extend a fixed answer prefix by exactly one token. The server appends that prefix as tokens after the rendered chat template to preserve the verified boundary. It requests the template's non-thinking mode, reads every candidate logit at the end of prefill, and applies softmax over those candidates at temperature 1. No top-k, top-p, penalties or grammar are applied.

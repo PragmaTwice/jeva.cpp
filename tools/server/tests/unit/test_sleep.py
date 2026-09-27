@@ -72,13 +72,19 @@ def test_server_sleep():
     assert res.body["is_sleeping"] == False
 
 
-def test_systemone_wakes_server():
+def test_systemone_wakes_server(tmp_path):
+    path = tmp_path / "decision.jinja"
+    path.write_text("{{ params.header }} {{ state_json }} {{ question.instructions_json }}", encoding="utf-8")
+    server.jev_template_file = str(path)
+    server.jev_template_kwargs = '{"header":"Evaluate"}'
+    server.jev_answer_prefix = "Decision:"
     server.n_ctx = 2048
     server.sleep_idle_seconds = 1
     server.start()
     request = {"state": "The sky is blue.", "questions": {"q": {"type": "noul", "instructions": "Is the sky blue?"}}}
     before = server.make_request("POST", "/v1/systemone", data=request)
     assert before.status_code == 200
+    path.unlink()
     wait_for_sleep(server)
     after = server.make_request("POST", "/v1/systemone", data=request)
     assert after.status_code == 200

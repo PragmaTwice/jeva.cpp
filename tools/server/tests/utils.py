@@ -107,6 +107,10 @@ class ServerProcess:
     reasoning: Literal['on', 'off', 'auto'] | None = None
     chat_template: str | None = None
     chat_template_file: str | None = None
+    jev_template: str | None = None
+    jev_template_file: str | None = None
+    jev_template_kwargs: str | None = None
+    jev_answer_prefix: str | None = None
     server_path: str | None = None
     mmproj_url: str | None = None
     no_mmproj: bool | None = None
@@ -267,6 +271,14 @@ class ServerProcess:
             server_args.extend(["--chat-template", self.chat_template])
         if self.chat_template_file:
             server_args.extend(["--chat-template-file", self.chat_template_file])
+        if self.jev_template is not None:
+            server_args.extend(["--jev-template", self.jev_template])
+        if self.jev_template_file is not None:
+            server_args.extend(["--jev-template-file", self.jev_template_file])
+        if self.jev_template_kwargs is not None:
+            server_args.extend(["--jev-template-kwargs", self.jev_template_kwargs])
+        if self.jev_answer_prefix is not None:
+            server_args.extend(["--jev-answer-prefix", self.jev_answer_prefix])
         if self.mmproj_url:
             server_args.extend(["--mmproj-url", self.mmproj_url])
         if self.no_mmproj:

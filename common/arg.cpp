@@ -3767,6 +3767,43 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
     add_opt(common_arg(
+        {"--jev-template"}, "JINJA_TEMPLATE",
+        "set the JEV decision content template (default: built-in template)",
+        [](common_params & params, const std::string & value) {
+            if (value.empty()) {
+                throw std::invalid_argument("JEV template must not be empty");
+            }
+            params.jev_template = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_JEV_TEMPLATE"));
+    add_opt(common_arg(
+        {"--jev-template-file"}, "JINJA_TEMPLATE_FILE",
+        "load the JEV decision content template from a file",
+        [](common_params & params, const std::string & value) {
+            params.jev_template = read_file(value);
+            if (params.jev_template.empty()) {
+                throw std::invalid_argument("JEV template must not be empty");
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_JEV_TEMPLATE_FILE"));
+    add_opt(common_arg(
+        {"--jev-template-kwargs"}, "JSON",
+        "set JEV template variables under params (must be a JSON object)",
+        [](common_params & params, const std::string & value) {
+            if (!json::parse(value).is_object()) {
+                throw std::invalid_argument("JEV template kwargs must be a JSON object");
+            }
+            params.jev_template_kwargs = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_JEV_TEMPLATE_KWARGS"));
+    add_opt(common_arg(
+        {"--jev-answer-prefix"}, "STRING",
+        "set the JEV answer prefix used to validate single-token labels (default: Answer:)",
+        [](common_params & params, const std::string & value) {
+            params.jev_answer_prefix = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_JEV_ANSWER_PREFIX"));
+    add_opt(common_arg(
         {"--skip-chat-parsing"},
         {"--no-skip-chat-parsing"},
         string_format(

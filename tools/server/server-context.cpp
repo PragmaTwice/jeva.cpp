@@ -853,6 +853,7 @@ public:
 
     // note: chat_params must not be refreshed upon existing sleeping state
     server_chat_params chat_params;
+    std::unique_ptr<const server_jev_template> jev_template;
 
     server_state_callback_t callback_state = [](server_state, json) -> void {};
 
@@ -1448,6 +1449,13 @@ private:
                     return false;
                 }
             }
+        }
+
+        try {
+            jev_template = std::make_unique<server_jev_template>(params_base);
+        } catch (const std::exception & e) {
+            SRV_ERR("JEV template configuration error: %s\n", e.what());
+            return false;
         }
 
         // populate chat template params
@@ -5193,10 +5201,13 @@ void server_routes::init_routes() {
 
         server_jev_request request;
         try {
-            request = server_jev_parse(json::parse(req.body), meta->chat_params, ctx_server.vocab);
+            request = server_jev_parse(json::parse(req.body), meta->chat_params, ctx_server.vocab, *ctx_server.jev_template);
             for (auto & task : request.tasks) {
                 task.id = res->rd.get_new_id();
             }
+        } catch (const server_jev_template_error & e) {
+            res->error(format_error_response(e.what(), ERROR_TYPE_SERVER));
+            return res;
         } catch (const std::exception & e) {
             auto error = format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST);
             error["code"] = 422;

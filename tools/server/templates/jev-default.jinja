@@ -1,0 +1,11 @@
+Evaluate the state using the question and options. Reply with only the label of the best matching option. Do not explain or reason aloud.
+
+State (JSON):
+{{ state_json }}
+{%- if question.instructions is not none %}
+{{- '\n\nQuestion (JSON):\n' }}{{ question.instructions_json }}
+{%- endif %}
+{{- '\n\nOptions:\n' }}
+{%- for option in options %}
+{{- option.label }}: {{ option.json }}{{ '\n' }}
+{%- endfor -%}

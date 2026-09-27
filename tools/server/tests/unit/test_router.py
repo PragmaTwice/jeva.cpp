@@ -23,7 +23,16 @@ def test_router_props():
     assert res.body["build_info"].startswith("b")
 
 
-def test_router_systemone():
+def test_router_systemone(tmp_path):
+    preset = tmp_path / "models.ini"
+    preset.write_text(
+        "version = 1\n[ggml-org/test-model-stories260K]\nhf-repo = ggml-org/test-model-stories260K\n"
+        "jev-template = {% if state != params.expected %}{{ raise_exception('JEV preset applied') }}{% endif %}{{ state }}\n"
+        'jev-template-kwargs = {"expected":"The sky is blue."}\n'
+        "jev-answer-prefix = Decision:\n",
+        encoding="utf-8",
+    )
+    server.models_preset = str(preset)
     server.n_ctx = 1024
     server.start()
     res = server.make_request("POST", "/v1/systemone", data={
@@ -34,6 +43,11 @@ def test_router_systemone():
     assert res.status_code == 200, res.body
     assert 0 <= res.body["answers"]["q"]["noul"] <= 1
     assert res.body["usage"]["output_tokens"] == 0
+    res = server.make_request("POST", "/v1/systemone", data={
+        "model": "ggml-org/test-model-stories260K", "state": "different", "questions": {"q": {"type": "noul"}},
+    })
+    assert res.status_code == 500, res.body
+    assert "JEV preset applied" in res.body["error"]["message"]
 
 
 @pytest.mark.parametrize(

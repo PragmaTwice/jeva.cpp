@@ -1,8 +1,35 @@
 #include "server-jev.h"
+#include "server-jev-template.h"
+#include "jinja/parser.h"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+
+server_jev_template::server_jev_template(const common_params & config)
+    : source(config.jev_template.empty() ? SERVER_JEV_TEMPLATE : config.jev_template),
+      params(json::parse(config.jev_template_kwargs)),
+      answer_prefix(config.jev_answer_prefix) {
+    if (!params.is_object()) {
+        throw std::invalid_argument("JEV template kwargs must be a JSON object");
+    }
+    jinja::lexer lexer;
+    auto lexed = lexer.tokenize(source);
+    program = jinja::parse_from_tokens(lexed);
+    source = std::move(lexed.source);
+}
+
+std::string server_jev_template::render(const json & input) const {
+    try {
+        jinja::context ctx(source);
+        jinja::global_from_json(ctx, input, true);
+        jinja::global_from_json(ctx, json {{"params", params}, {"answer_prefix", answer_prefix}}, false);
+        jinja::runtime runtime(ctx);
+        return runtime.gather_string_parts(runtime.execute(program))->as_string().str();
+    } catch (const std::exception & e) {
+        throw server_jev_template_error(std::string("JEV template rendering failed: ") + e.what());
+    }
+}
 
 static void jev_check_fields(const json & value, const std::vector<std::string> & fields, const std::string & path) {
     if (!value.is_object()) {
@@ -27,8 +54,7 @@ struct jev_labels {
     std::vector<std::string> names;
 };
 
-static jev_labels jev_make_labels(const llama_vocab * vocab, size_t count) {
-    const std::string prefix = "Answer:";
+static jev_labels jev_make_labels(const llama_vocab * vocab, size_t count, const std::string & prefix) {
     jev_labels labels;
     labels.prefix = common_tokenize(vocab, prefix, false, false);
 
@@ -71,7 +97,7 @@ static jev_labels jev_make_labels(const llama_vocab * vocab, size_t count) {
     return labels;
 }
 
-server_jev_request server_jev_parse(const json & body, const server_chat_params & chat, const llama_vocab * vocab) {
+server_jev_request server_jev_parse(const json & body, const server_chat_params & chat, const llama_vocab * vocab, const server_jev_template & tmpl) {
     jev_check_fields(body, {"model", "state", "questions"}, "request");
     if (body.contains("model") && (!body.at("model").is_string() || body.at("model").get<std::string>().empty())) {
         throw std::invalid_argument("model must be a non-empty string");
@@ -134,15 +160,12 @@ server_jev_request server_jev_parse(const json & body, const server_chat_params 
         request.questions.push_back(std::move(question));
     }
 
-    const auto labels = jev_make_labels(vocab, n_labels);
-    const std::string state = body.at("state").dump();
+    const auto labels = jev_make_labels(vocab, n_labels, tmpl.answer_prefix);
+    const auto & state = body.at("state");
+    const std::string state_json = state.dump();
     const auto now = std::chrono::system_clock::now();
     for (const auto & question : request.questions) {
-        std::string content = "Evaluate the state using the question and options. Reply with only the label of the best matching option. Do not explain or reason aloud.\n\nState (JSON):\n" + state;
-        if (!question.instructions.is_null()) {
-            content += "\n\nQuestion (JSON):\n" + question.instructions.dump();
-        }
-        content += "\n\nOptions:\n";
+        json options = json::array();
         for (size_t i = 0; i < question.choices.size(); ++i) {
             const auto & name = question.choices[i];
             json description;
@@ -151,12 +174,21 @@ server_jev_request server_jev_parse(const json & body, const server_chat_params 
             } else if (question.criteria.contains(name)) {
                 description = question.criteria.at(name);
             }
-            content += labels.names[i] + ": " + json({{"name", name}, {"description", description}}).dump() + "\n";
+            options.push_back(json {
+                {"label", labels.names[i]}, {"name", name}, {"description", description},
+                {"json", json({{"name", name}, {"description", description}}).dump()},
+            });
         }
 
         common_chat_msg message;
         message.role = "user";
-        message.content = std::move(content);
+        message.content = tmpl.render(json {
+            {"state", state}, {"state_json", state_json}, {"options", options},
+            {"question", {
+                {"type", question.type}, {"instructions", question.instructions}, {"criteria", question.criteria},
+                {"instructions_json", question.instructions.dump()}, {"criteria_json", question.criteria.dump()},
+            }},
+        });
         common_chat_templates_inputs inputs;
         inputs.messages.push_back(std::move(message));
         inputs.use_jinja = chat.use_jinja;

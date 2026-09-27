@@ -69,6 +69,94 @@ def test_systemone_questions(kv_unified, jinja):
                 assert 0 <= answer["confidence"] <= 1
 
 
+def test_systemone_default_template(monkeypatch):
+    monkeypatch.setenv("LLAMA_SERVER_SLOTS_DEBUG", "1")
+    server.server_slots = True
+    server.n_slots = 1
+    server.n_ctx = 2048
+    server.start()
+    state = {"amount": 1.123456789, "items": [None, True, "\u4e2d\u6587\n\"quoted\""], "large": 18446744073709551615}
+    question = {"type": "choice", "instructions": {"threshold": 0.123456789}, "criteria": {"only": {"value": 9.87654321}}}
+    res = server.make_request("POST", "/v1/systemone", data={"state": state, "questions": {"private-id": question}})
+    assert res.status_code == 200, res.body
+    slots = server.make_request("GET", "/slots")
+    prompt = slots.body[0]["prompt"]
+    assert "State (JSON):\n" + json.dumps(state, ensure_ascii=False, separators=(",", ":")) in prompt
+    assert 'Question (JSON):\n{"threshold":0.123456789}\n\nOptions:\n' in prompt
+    assert '{"name":"only","description":{"value":9.87654321}}\n' in prompt
+    assert "private-id" not in prompt
+    assert prompt.endswith("Answer:")
+
+
+@pytest.mark.parametrize("source", ["inline", "file", "env"])
+def test_systemone_custom_template(source, tmp_path, monkeypatch):
+    monkeypatch.setenv("LLAMA_SERVER_SLOTS_DEBUG", "1")
+    template = (
+        "{% if question.id is defined or questions is defined %}{{ raise_exception('Unexpected question IDs') }}{% endif %}"
+        "{% set _ = params.seen.append(state.message) %}"
+        "{% if params.seen|length != 1 %}{{ raise_exception('Shared template context') }}{% endif %}"
+        "{{ params.heading }}|{{ question.type }}|{{ state.message }}|{{ question.instructions }}|"
+        "{% for option in options %}{{ option.label }}={{ option.name }}:{{ option.description }};{% endfor %}"
+    )
+    if source == "inline":
+        server.jev_template = template
+    elif source == "file":
+        path = tmp_path / "decision.jinja"
+        path.write_text(template, encoding="utf-8")
+        server.jev_template_file = str(path)
+    else:
+        monkeypatch.setenv("LLAMA_ARG_JEV_TEMPLATE", template)
+    server.jev_template_kwargs = '{"heading":"Assess","state":"must not replace request state","seen":[]}'
+    server.jev_answer_prefix = "Decision:"
+    server.server_slots = True
+    server.n_slots = 1
+    server.n_ctx = 2048
+    server.start()
+    if source == "file":
+        path.unlink()  # The template must already be loaded and compiled.
+    for text in ["first", "second"]:
+        res = server.make_request("POST", "/v1/systemone", data={
+            "state": {"message": text},
+            "questions": {"q": {"type": "choice", "instructions": "Pick", "criteria": {"only": "description"}}},
+        })
+        assert res.status_code == 200, res.body
+        assert res.body["answers"]["q"]["choice"] == "only"
+        prompt = server.make_request("GET", "/slots").body[0]["prompt"]
+        assert f"Assess|choice|{text}|Pick|" in prompt
+        assert "=only:description;" in prompt
+        assert prompt.endswith("Decision:")
+    results = parallel_function_calls([
+        (server.make_request, ("POST", "/v1/systemone", {
+            "state": {"message": str(i)}, "questions": {"q": {"type": "noul", "instructions": "Pick"}},
+        })) for i in range(4)
+    ])
+    assert all(res is not None and res.status_code == 200 for res in results)
+    res = server.make_request("POST", "/chat/completions", data={"messages": [{"role": "user", "content": "Hello"}], "max_tokens": 4})
+    assert res.status_code == 200
+    prompt = server.make_request("GET", "/slots").body[0]["prompt"]
+    assert "Assess|" not in prompt and "Decision:" not in prompt
+
+
+@pytest.mark.parametrize("template,kwargs", [("{% if %}", "{}"), ("{{ state }}", "[]"), ("", "{}")])
+def test_systemone_template_config_error(template, kwargs, tmp_path):
+    server.jev_template = template
+    server.jev_template_kwargs = kwargs
+    server.log_path = str(tmp_path / "server.log")
+    with pytest.raises(RuntimeError, match="Server process died"):
+        server.start()
+    assert "JEV template" in (tmp_path / "server.log").read_text()
+
+
+def test_systemone_template_render_error():
+    server.jev_template = "{% if state.fail %}{{ raise_exception('Invalid decision input') }}{% endif %}{{ state_json }}"
+    server.start()
+    for fail in [True, False]:
+        res = server.make_request("POST", "/v1/systemone", data={"state": {"fail": fail}, "questions": {"q": {"type": "noul"}}})
+        assert res.status_code == (500 if fail else 200), res.body
+        if fail:
+            assert "JEV template rendering failed" in res.body["error"]["message"]
+
+
 def test_systemone_validation():
     server.n_ctx = 2048
     server.start()

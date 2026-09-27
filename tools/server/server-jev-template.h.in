@@ -1,0 +1,3 @@
+#pragma once
+
+static constexpr char SERVER_JEV_TEMPLATE[] = R"jev(@JEV_TEMPLATE@)jev";
