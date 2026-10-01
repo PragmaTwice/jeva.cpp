@@ -62,11 +62,14 @@ static jev_labels jev_make_labels(const llama_vocab * vocab, size_t count, const
         if (labels.tokens.size() == count) {
             return;
         }
-        const auto tokens = common_tokenize(vocab, prefix + " " + name, false, false);
+        const auto tokens = common_tokenize(vocab, prefix + name, false, false);
         if (tokens.size() != labels.prefix.size() + 1 || !std::equal(labels.prefix.begin(), labels.prefix.end(), tokens.begin())) {
             return;
         }
         const llama_token token = tokens.back();
+        if (common_token_to_piece(vocab, token) != name) {
+            return;
+        }
         const auto attr = llama_vocab_get_attr(vocab, token);
         if (llama_vocab_is_eog(vocab, token) || (attr & (LLAMA_TOKEN_ATTR_UNKNOWN | LLAMA_TOKEN_ATTR_UNUSED | LLAMA_TOKEN_ATTR_CONTROL))) {
             return;
@@ -175,7 +178,7 @@ server_jev_request server_jev_parse(const json & body, const server_chat_params 
                 description = question.criteria.at(name);
             }
             options.push_back(json {
-                {"label", labels.names[i]}, {"name", name}, {"description", description},
+                {"label", labels.names[i]}, {"name", name}, {"description", description}, {"description_json", description.dump()},
                 {"json", json({{"name", name}, {"description", description}}).dump()},
             });
         }

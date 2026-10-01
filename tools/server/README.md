@@ -241,7 +241,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--jev-template JINJA_TEMPLATE` | set the JEV decision content template (default: built-in template)<br/>(env: LLAMA_ARG_JEV_TEMPLATE) |
 | `--jev-template-file JINJA_TEMPLATE_FILE` | load the JEV decision content template from a file<br/>(env: LLAMA_ARG_JEV_TEMPLATE_FILE) |
 | `--jev-template-kwargs JSON` | set JEV template variables under params (must be a JSON object)<br/>(env: LLAMA_ARG_JEV_TEMPLATE_KWARGS) |
-| `--jev-answer-prefix STRING` | set the JEV answer prefix used to validate single-token labels (default: Answer:)<br/>(env: LLAMA_ARG_JEV_ANSWER_PREFIX) |
+| `--jev-answer-prefix STRING` | set the JEV answer prefix used to validate single-token labels (default: Answer:\n)<br/>(env: LLAMA_ARG_JEV_ANSWER_PREFIX) |
 | `--skip-chat-parsing, --no-skip-chat-parsing` | force a pure content parser, even if a Jinja template is specified; model will output everything in the content section, including any reasoning and/or tool calls (default: disabled)<br/>(env: LLAMA_ARG_SKIP_CHAT_PARSING) |
 | `--prefill-assistant, --no-prefill-assistant` | whether to prefill the assistant's response if the last message is an assistant message (default: prefill enabled)<br/>when this flag is set, if the last message is an assistant message then it will be treated as a full message and not prefilled<br/><br/>(env: LLAMA_ARG_PREFILL_ASSISTANT) |
 | `-sps, --slot-prompt-similarity SIMILARITY` | how much the prompt of a request must match the prompt of a slot in order to use that slot (default: 0.10, 0.0 = disabled) |

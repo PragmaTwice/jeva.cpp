@@ -46,7 +46,7 @@ curl http://localhost:8080/v1/systemone \
 | `score` | Array of 2-10 level descriptions | `score`, `probabilities`, `legend`, `confidence` |
 | `noul` | Optional map with `true` and/or `false` descriptions | `noul`, the probability of true |
 
-All answers also contain `type`. Instructions are optional and may be null. Instructions and non-null descriptions accept strings, objects or arrays, including nested JSON values. Choice option names and descriptions both appear in the prompt. Score probability and legend keys are string indices starting at `"0"`; legend values preserve the original descriptions.
+All answers also contain `type`. Instructions are optional and may be null. Instructions and non-null descriptions accept strings, objects or arrays, including nested JSON values. The default template displays each option's description, or its name when the description is null. Score probability and legend keys are string indices starting at `"0"`; legend values preserve the original descriptions.
 
 The response contains `model`, `answers` keyed by question ID, and `usage`. `usage.input_tokens` is the sum of the full compiled prompt lengths for all questions, including templates and answer prefixes. It is independent of cache hits and counts shared prefixes once per question. `usage.output_tokens` is zero. Server metrics separately report processed and cached prompt tokens.
 
@@ -54,7 +54,7 @@ Unsupported request fields are rejected rather than silently ignored. Streaming,
 
 ## Decision templates
 
-JEV renders a decision content template into one user message, then applies the model's existing chat template. The [default decision template](../tools/server/templates/jev-default.jinja) is embedded in the binary and preserves the original JEV prompt, including JSON formatting. It does not require a template file at runtime.
+JEV renders a decision content template into one user message, then applies the model's existing chat template. The [default decision template](../tools/server/templates/jev-default.jinja) places the state before the evaluation instructions, question and options. It asks for exactly one option label and treats instructions within the state as material to evaluate. Strings are displayed as plain text; structured values use the server's JSON serializer. The template is embedded in the binary and does not require a template file at runtime.
 
 Use these server options to customize decision prompts:
 
@@ -63,7 +63,7 @@ Use these server options to customize decision prompts:
 | `--jev-template-file PATH` | `LLAMA_ARG_JEV_TEMPLATE_FILE` | Load a Jinja content template from a UTF-8 file |
 | `--jev-template SOURCE` | `LLAMA_ARG_JEV_TEMPLATE` | Set an inline Jinja content template |
 | `--jev-template-kwargs JSON` | `LLAMA_ARG_JEV_TEMPLATE_KWARGS` | Set an object available as `params` in the template; default `{}` |
-| `--jev-answer-prefix STRING` | `LLAMA_ARG_JEV_ANSWER_PREFIX` | Set the answer prefix; default `Answer:` |
+| `--jev-answer-prefix STRING` | `LLAMA_ARG_JEV_ANSWER_PREFIX` | Set the answer prefix; default `Answer:\n` (a trailing newline) |
 
 These options also work in model INI presets. Use one template source per configuration. Router CLI options override model presets, following the existing router behavior. The HTTP request format is unchanged.
 
@@ -76,7 +76,8 @@ The template context contains:
 | `question.type` | `choice`, `score` or `noul` |
 | `question.instructions`, `question.criteria` | The current question's data; missing instructions are null and missing Noul criteria become an empty object |
 | `question.instructions_json`, `question.criteria_json` | Serialized versions of those values |
-| `options` | Ordered list of objects with `label`, `name`, `description` and `json` |
+| `options` | Ordered list of objects with `label`, `name`, `description`, `description_json` and `json` |
+| `options[i].description_json` | Serialized option description, including null |
 | `options[i].json` | Serialized object containing that option's `name` and `description` |
 | `params` | The object supplied with `--jev-template-kwargs` |
 | `answer_prefix` | The configured answer prefix, for reference in instructions |
@@ -97,11 +98,10 @@ Question: {{ question.instructions_json }}
 ```sh
 ./build/bin/llama-server -m model.gguf \
   --jev-template-file decision.jinja \
-  --jev-template-kwargs '{"instruction":"Choose the best option. Reply with its label only."}' \
-  --jev-answer-prefix 'Decision:'
+  --jev-template-kwargs '{"instruction":"Choose the best option. Reply with its label only."}'
 ```
 
-The content template runs before the model's chat template. Do not include model role markers or append the answer prefix to the content: the server adds the prefix after chat formatting. It validates candidate tokens against the configured prefix, so changing the prefix can change the available labels and their capacity. No candidate is sampled or generated.
+The content template runs before the model's chat template. Do not include model role markers or append the answer prefix to the content: the server adds the prefix after chat formatting. Prefixes accept literal whitespace; for example, Bash users can set `--jev-answer-prefix $'Decision:\n'`. It validates candidate tokens against the configured prefix, so changing the prefix can change the available labels and their capacity. No candidate is sampled or generated.
 
 Content templates always use the existing C++ Jinja engine. `--jinja` / `--no-jinja` still controls the outer chat template. JEV template variables are separate from `--chat-template-kwargs`, and JEV configuration does not change ordinary chat or completion prompts.
 
@@ -109,7 +109,7 @@ Templates are compiled once during server initialization, with separate renderin
 
 ## Scoring and compatibility
 
-The tokenizer maps option labels to distinct existing tokens. Each label must extend a fixed answer prefix by exactly one token. The server appends that prefix as tokens after the rendered chat template to preserve the verified boundary. It requests the template's non-thinking mode, reads every candidate logit at the end of prefill, and applies softmax over those candidates at temperature 1. No top-k, top-p, penalties or grammar are applied.
+The tokenizer maps option labels to distinct existing tokens without adding a leading space. Each label must extend the answer prefix by exactly one token, and that token must decode to the label itself. With the default `Answer:\n` prefix, candidates are bare labels such as `A`, `B`, `C` and `D`. The server appends the prefix as tokens after the rendered chat template to preserve the verified boundary. It requests the template's non-thinking mode, reads every candidate logit at the end of prefill, and applies softmax over those candidates at temperature 1. No top-k, top-p, penalties or grammar are applied.
 
 The label pool tries uppercase letters, decimal numbers, lowercase letters and pairs of uppercase letters. A tokenizer may provide fewer than 255 usable labels. Requests exceeding its verified capacity return HTTP 422. There is no implicit multi-token fallback. Single-token support does not imply that a model can make accurate decisions; instruction following and label biases still need evaluation for the selected model and task. Templates that cannot disable reasoning can reduce decision quality.
 

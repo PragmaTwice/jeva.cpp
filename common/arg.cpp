@@ -3798,7 +3798,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_JEV_TEMPLATE_KWARGS"));
     add_opt(common_arg(
         {"--jev-answer-prefix"}, "STRING",
-        "set the JEV answer prefix used to validate single-token labels (default: Answer:)",
+        "set the JEV answer prefix used to validate single-token labels (default: Answer:\\n)",
         [](common_params & params, const std::string & value) {
             params.jev_answer_prefix = value;
         }

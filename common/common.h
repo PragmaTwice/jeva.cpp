@@ -637,7 +637,7 @@ struct common_params {
     std::string chat_template = "";                                                                         // NOLINT
     std::string jev_template;
     std::string jev_template_kwargs = "{}";
-    std::string jev_answer_prefix = "Answer:";
+    std::string jev_answer_prefix = "Answer:\n";
     std::vector<std::string> hostnames = {"127.0.0.1"};
     bool use_jinja = true;                                                                                  // NOLINT
 
