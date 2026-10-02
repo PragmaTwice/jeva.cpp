@@ -1954,7 +1954,6 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           release_name: ${{ steps.tag.outputs.name }}-jeva
-          prerelease: true
           body: |
             <details open>
 
