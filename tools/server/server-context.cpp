@@ -295,6 +295,8 @@ struct server_slot {
     // state
     slot_state state = SLOT_STATE_IDLE;
 
+    bool jev_answer = false;
+
     server_prompt prompt;
 
     bool prompt_save(server_prompt_cache & prompt_cache) const {
@@ -377,6 +379,7 @@ struct server_slot {
         has_new_line   = false;
         truncated      = false;
         stop           = STOP_TYPE_NONE;
+        jev_answer     = false;
         stopping_word  = "";
         n_sent_text    = 0;
 
@@ -453,7 +456,10 @@ struct server_slot {
         const bool logits_only = task->need_logits() && other_slot.task->need_logits()
             && (!task->need_sampling() || !other_slot.task->need_sampling());
 
-        return (task->type == other_slot.task->type || logits_only)
+        const bool jev_generation = (task->jev_thinking && other_slot.task->type == SERVER_TASK_TYPE_COMPLETION)
+            || (other_slot.task->jev_thinking && task->type == SERVER_TASK_TYPE_COMPLETION);
+
+        return (task->type == other_slot.task->type || logits_only || jev_generation)
             && inp_embd.size() == other_slot.inp_embd.size()
             && are_lora_equal(lora, other_slot.lora);
     }
@@ -472,7 +478,7 @@ struct server_slot {
     }
 
     bool can_speculate() const {
-        return !!spec;
+        return !!spec && (!task || !task->jev_thinking);
     }
 
     void add_token(const completion_token_output & token) {
@@ -1802,6 +1808,16 @@ private:
         SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
 
         // initialize samplers
+        if (task.jev_thinking) {
+            // Reserve the answer prefix, UTF-8 completion, and final logits position.
+            const int64_t available = int64_t(slot.n_ctx) - task.n_tokens()
+                - int64_t(task.params.sampling.reasoning_budget_forced.size()) - 8;
+            if (available < 0) {
+                send_error(task, "Not enough context for thinking and the decision answer prefix", ERROR_TYPE_INVALID_REQUEST);
+                return false;
+            }
+            task.params.sampling.reasoning_budget_tokens = std::min<int64_t>(task.params.sampling.reasoning_budget_tokens, available);
+        }
         if (task.need_sampling()) {
             try {
                 slot.smpl.reset(common_sampler_init(model_tgt, task.params.sampling));
@@ -2259,6 +2275,7 @@ private:
         res->id       = slot.task->id;
         res->index    = slot.task->index;
         res->n_tokens = slot.task->n_tokens();
+        res->n_generated = slot.stats.n_gen;
         for (llama_token token : slot.task->candidate_tokens) {
             res->logits.push_back(logits[token]);
         }
@@ -3856,7 +3873,7 @@ private:
             }
 
             if (slot.state == SLOT_STATE_DONE_PROMPT) {
-                if (slot.task->type == SERVER_TASK_TYPE_JEV) {
+                if (slot.task->type == SERVER_TASK_TYPE_JEV && !slot.task->jev_thinking) {
                     send_jev(slot, slot.i_batch - off);
                     slot.stats.update_prompt_last();
                     slot.release();
@@ -3891,6 +3908,23 @@ private:
                 return;
             }
 
+            if (slot.task->jev_thinking) {
+                // The last accepted token has now been decoded, so these logits follow the full prefix.
+                if (slot.jev_answer) {
+                    slot.stats.update_gen_last();
+                    send_jev(slot, slot.i_batch - off);
+                    slot.print_timings();
+                    slot.release();
+                    slot.i_batch = -1;
+                    return;
+                }
+                if (slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+                    send_error(slot, "Thinking exhausted the available context", ERROR_TYPE_INVALID_REQUEST);
+                    slot.release();
+                    return;
+                }
+            }
+
             if (slot.can_speculate() && !slot.spec_draft.empty()) {
                 return; // sample using speculative decoding
             }
@@ -3902,6 +3936,9 @@ private:
             {
                 scoped_timer timer(t_sampl, n_sampl);
                 id = common_sampler_sample(slot.smpl.get(), slot.ctx_tgt, tok_idx);
+                if (slot.task->jev_thinking && llama_vocab_is_eog(vocab, id) && common_sampler_reasoning_budget_force(slot.smpl.get())) {
+                    id = common_sampler_sample(slot.smpl.get(), slot.ctx_tgt, tok_idx);
+                }
             }
 
             slot.i_batch = -1;
@@ -3920,6 +3957,16 @@ private:
             }
 
             slot.stats.update_gen_last();
+
+            if (slot.task->jev_thinking) {
+                slot.sampled = id;
+                slot.jev_answer = common_sampler_reasoning_budget_done(slot.smpl.get());
+                if (llama_vocab_is_eog(vocab, id) && !slot.jev_answer) {
+                    send_error(slot, "Model stopped before the thinking boundary", ERROR_TYPE_SERVER);
+                    slot.release();
+                }
+                return;
+            }
 
             completion_token_output result;
             result.tok          = id;
@@ -5201,7 +5248,7 @@ void server_routes::init_routes() {
 
         server_jev_request request;
         try {
-            request = server_jev_parse(json::parse(req.body), meta->chat_params, ctx_server.vocab, *ctx_server.jev_template);
+            request = server_jev_parse(json::parse(req.body), meta->chat_params, ctx_server.vocab, *ctx_server.jev_template, params.sampling);
             for (auto & task : request.tasks) {
                 task.id = res->rd.get_new_id();
             }
@@ -5226,14 +5273,16 @@ void server_routes::init_routes() {
 
         json answers = json::object();
         int64_t input_tokens = 0;
+        int64_t output_tokens = 0;
         for (size_t i = 0; i < results.results.size(); ++i) {
             const auto * result = dynamic_cast<const server_task_result_jev *>(results.results[i].get());
             GGML_ASSERT(result);
             const auto & question = request.questions[i];
             answers[question.id] = question.answer(result->logits);
             input_tokens += result->n_tokens;
+            output_tokens += result->n_generated;
         }
-        res->ok(json {{"model", meta->model_name}, {"answers", answers}, {"usage", {{"input_tokens", input_tokens}, {"output_tokens", 0}}}});
+        res->ok(json {{"model", meta->model_name}, {"answers", answers}, {"usage", {{"input_tokens", input_tokens}, {"output_tokens", output_tokens}}}});
         return res;
     };
 

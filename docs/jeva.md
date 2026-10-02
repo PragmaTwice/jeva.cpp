@@ -48,9 +48,37 @@ curl http://localhost:8080/v1/systemone \
 
 All answers also contain `type`. Instructions are optional and may be null. Instructions and non-null descriptions accept strings, objects or arrays, including nested JSON values. The default template displays each option's description, or its name when the description is null. Score probability and legend keys are string indices starting at `"0"`; legend values preserve the original descriptions.
 
-The response contains `model`, `answers` keyed by question ID, and `usage`. `usage.input_tokens` is the sum of the full compiled prompt lengths for all questions, including templates and answer prefixes. It is independent of cache hits and counts shared prefixes once per question. `usage.output_tokens` is zero. Server metrics separately report processed and cached prompt tokens.
+The response contains `model`, `answers` keyed by question ID, and `usage`. `usage.input_tokens` is the sum of the full compiled prompt lengths for all questions, including templates and the analysis or answer prefix. It is independent of cache hits and counts shared prefixes once per question. Without thinking, `usage.output_tokens` is zero. Server metrics separately report processed and cached prompt tokens.
 
 Unsupported request fields are rejected rather than silently ignored. Streaming, per-request sampling parameters, tools and media are not implemented. Invalid request bodies return HTTP 422. Context overflow and inference errors use the existing server errors. One failing question fails the request and cancels remaining work.
+
+## Thinking
+
+Set `"thinking": true` to generate an analysis before scoring the answer. The default is `false`, which retains the original prompt and prefill-only scoring path. This is a jeva.cpp extension and works with Choice, Score and Noul.
+
+```json
+{
+  "thinking": true,
+  "reasoning_budget_tokens": 256,
+  "state": "The customer received a damaged item and requests a replacement.",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "criteria": {"sales": "New purchases", "support": "Problems with an order"}
+    }
+  }
+}
+```
+
+`reasoning_budget_tokens` is an optional non-negative integer and requires `thinking: true`. It limits analysis tokens per question, not per HTTP request. The default is the server's finite `--reasoning-budget`, or 512 when that setting is unlimited. Zero immediately closes the analysis; it does not select the non-thinking prompt. The budget is reduced when necessary to leave context space for the answer prefix and UTF-8 completion. A request that cannot fit these boundaries fails instead of discarding its input through context shifting.
+
+All models use ordinary assistant text for analysis. JEV disables native thinking in the chat template and uses that template to locate the assistant content, without opening or detecting native reasoning channels. Analysis starts with `Analysis:\n` and ends at the configured answer prefix. Set `params.thinking_prefix` through `--jev-template-kwargs` to customize that analysis prefix. Both prefixes must be non-empty. Custom decision templates receive `thinking` and `reasoning_budget_tokens` and should permit analysis before the final label when thinking is enabled.
+
+The default decision template asks for brief, direct analysis using only essential steps, without repeating the input or describing a plan. It includes the resolved token budget as a maximum and permits an earlier finish. It does not impose a fixed sentence count. This instruction complements the sampler's hard limit; the model may not follow it exactly. Context limits can reduce the actual budget below the maximum stated in the prompt.
+
+Thinking uses the server's sampling configuration and the existing reasoning budget sampler. Natural completion, EOS or budget exhaustion closes the analysis before scoring. A malformed ending or insufficient context returns an error. The final answer still comes from unmodified candidate logits at temperature 1, after the complete answer prefix has been evaluated. No answer token is sampled. Probabilities are conditional on the generated analysis, not an average over possible analyses; more thinking does not guarantee higher accuracy.
+
+The analysis stays in the same slot and model memory throughout the request. It is not returned as response text. `usage.output_tokens` counts sampled analysis and the answer prefix, including forced tokens on EOS or budget exhaustion. Each question has its own analysis and budget. Thinking uses standard autoregressive decoding without speculative proposals or backend sampling, while model computation and continuous batching continue to use the configured backend. Ordinary chat and completion requests retain their existing sampling behavior, including native thinking.
 
 ## Decision templates
 
@@ -81,6 +109,8 @@ The template context contains:
 | `options[i].json` | Serialized object containing that option's `name` and `description` |
 | `params` | The object supplied with `--jev-template-kwargs` |
 | `answer_prefix` | The configured answer prefix, for reference in instructions |
+| `thinking` | Whether this request generates analysis before scoring |
+| `reasoning_budget_tokens` | Per-question budget resolved from the request, server setting or default; zero when thinking is disabled. Context limits may reduce it further. |
 
 Question IDs and other questions are not exposed to the template. Options and their labels are assigned by the server; display those labels without changing their association with the options. Prefer the serialized fields when including JSON verbatim. The Jinja engine's `tojson` filter has different formatting and can round floating-point values.
 
@@ -109,7 +139,7 @@ Templates are compiled once during server initialization, with separate renderin
 
 ## Scoring and compatibility
 
-The tokenizer maps option labels to distinct existing tokens without adding a leading space. Each label must extend the answer prefix by exactly one token, and that token must decode to the label itself. With the default `Answer:\n` prefix, candidates are bare labels such as `A`, `B`, `C` and `D`. The server appends the prefix as tokens after the rendered chat template to preserve the verified boundary. It requests the template's non-thinking mode, reads every candidate logit at the end of prefill, and applies softmax over those candidates at temperature 1. No top-k, top-p, penalties or grammar are applied.
+The tokenizer maps option labels to distinct existing tokens without adding a leading space. Each label must extend the answer prefix by exactly one token, and that token must decode to the label itself. With the default `Answer:\n` prefix, candidates are bare labels such as `A`, `B`, `C` and `D`. The server appends the prefix as tokens to preserve the verified boundary. By default it requests the template's non-thinking mode and reads every candidate logit at the end of prefill. With thinking enabled, scoring follows the analysis and answer prefix instead. Both paths apply softmax over those candidates at temperature 1, without top-k, top-p, penalties or grammar.
 
 The label pool tries uppercase letters, decimal numbers, lowercase letters and pairs of uppercase letters. A tokenizer may provide fewer than 255 usable labels. Requests exceeding its verified capacity return HTTP 422. There is no implicit multi-token fallback. Single-token support does not imply that a model can make accurate decisions; instruction following and label biases still need evaluation for the selected model and task. Templates that cannot disable reasoning can reduce decision quality.
 
@@ -123,6 +153,6 @@ Each question uses an ordinary server slot. Requests with more questions than sl
 
 Questions put the shared state before the question and options so subsequent work on a slot can reuse that prefix. Multiple cold slots can still prefill the state independently; this version does not introduce a separate shared-prefix sequence or a new cache manager. Cache reuse depends on slot selection, available memory and model capabilities.
 
-With speculative decoding configured, the existing draft-state synchronization is retained so later generation can reuse the slot correctly. There is no answer generation or draft proposal for a decision task. For decision-only serving, a draft model is unnecessary.
+With speculative decoding configured, the existing draft-state synchronization is retained so later generation can reuse the slot correctly. There is no answer generation or draft proposal for a decision task, including during thinking. For decision-only serving, a draft model is unnecessary.
 
 Prefill may use multiple `llama_decode()` calls; the function name does not imply autoregressive output generation. The full vocabulary output projection is still computed. Benchmark against the same model and prompt generating one constrained label token, as well as longer generated answers. Avoid inferring an acceleration factor from token counts alone.

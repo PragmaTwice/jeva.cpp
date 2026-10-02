@@ -154,6 +154,7 @@ struct server_task {
     task_params   params;
     server_tokens tokens;
     llama_tokens candidate_tokens; // used by SERVER_TASK_TYPE_JEV
+    bool jev_thinking = false;
 
     // only used by CLI, this allow tokenizing CLI inputs on server side
     // we need this because mtmd_context and vocab are not accessible outside of server_context
@@ -208,6 +209,8 @@ struct server_task {
 
     bool need_sampling() const {
         switch (type) {
+            case SERVER_TASK_TYPE_JEV:
+                return jev_thinking;
             case SERVER_TASK_TYPE_COMPLETION:
             case SERVER_TASK_TYPE_INFILL:
                 return true;
@@ -480,6 +483,7 @@ struct server_task_result_rerank : server_task_result {
 struct server_task_result_jev : server_task_result {
     std::vector<float> logits;
     int32_t n_tokens = 0;
+    int32_t n_generated = 0;
 
     virtual json to_json() override;
 };

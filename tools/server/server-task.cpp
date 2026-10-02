@@ -1499,7 +1499,7 @@ json server_task_result_rerank::to_json() {
 // server_task_result_jev
 //
 json server_task_result_jev::to_json() {
-    return json {{"index", index}, {"logits", logits}, {"tokens_evaluated", n_tokens}};
+    return json {{"index", index}, {"logits", logits}, {"tokens_evaluated", n_tokens}, {"tokens_predicted", n_generated}};
 }
 
 //

@@ -93,6 +93,9 @@ uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl);
 // force the reasoning budget sampler (if any) to begin forcing its end sequence now.
 bool common_sampler_reasoning_budget_force(struct common_sampler * gsmpl);
 
+// True after a natural or forced reasoning end sequence has been accepted.
+bool common_sampler_reasoning_budget_done(const struct common_sampler * gsmpl);
+
 // helpers
 
 // access the internal list of current candidate tokens

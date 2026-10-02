@@ -308,17 +308,20 @@ struct common_sampler * common_sampler_init(
     }
 
     // reasoning budget sampler (skip when budget is unlimited unless a lazy grammar is active, which needs rbudget for thinking-block suppression)
-    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
+    if ((!params.reasoning_budget_start.empty() || params.reasoning_budget_prefilled) && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
         rbudget = common_reasoning_budget_init(
             vocab,
             {params.reasoning_budget_start},
             params.reasoning_budget_end,
             params.reasoning_budget_forced,
-            params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
+            params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens,
+            params.reasoning_budget_prefilled ? REASONING_BUDGET_COUNTING : REASONING_BUDGET_IDLE);
 
-        for (const auto & token : prefill_tokens) {
-            llama_sampler_accept(rbudget, token);
-            LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
+        if (!params.reasoning_budget_prefilled) {
+            for (const auto & token : prefill_tokens) {
+                llama_sampler_accept(rbudget, token);
+                LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
+            }
         }
     }
 
@@ -724,6 +727,10 @@ bool common_sampler_reasoning_budget_force(struct common_sampler * gsmpl) {
     }
 
     return common_reasoning_budget_force(gsmpl->rbudget);
+}
+
+bool common_sampler_reasoning_budget_done(const struct common_sampler * gsmpl) {
+    return gsmpl && common_reasoning_budget_get_state(gsmpl->rbudget) == REASONING_BUDGET_DONE;
 }
 
 // helpers

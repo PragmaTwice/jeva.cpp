@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 server_jev_template::server_jev_template(const common_params & config)
@@ -100,8 +101,20 @@ static jev_labels jev_make_labels(const llama_vocab * vocab, size_t count, const
     return labels;
 }
 
-server_jev_request server_jev_parse(const json & body, const server_chat_params & chat, const llama_vocab * vocab, const server_jev_template & tmpl) {
-    jev_check_fields(body, {"model", "state", "questions"}, "request");
+server_jev_request server_jev_parse(const json & body, const server_chat_params & chat, const llama_vocab * vocab, const server_jev_template & tmpl, const common_params_sampling & sampling) {
+    jev_check_fields(body, {"model", "state", "questions", "thinking", "reasoning_budget_tokens"}, "request");
+    if (body.contains("thinking") && !body.at("thinking").is_boolean()) {
+        throw std::invalid_argument("thinking must be a boolean");
+    }
+    const bool thinking = body.value("thinking", false);
+    int32_t budget = chat.reasoning_budget >= 0 ? chat.reasoning_budget : 512;
+    if (body.contains("reasoning_budget_tokens")) {
+        const auto & value = body.at("reasoning_budget_tokens");
+        if (!thinking || !value.is_number_integer() || value.get<int64_t>() < 0 || value.get<int64_t>() > std::numeric_limits<int32_t>::max()) {
+            throw std::invalid_argument("reasoning_budget_tokens requires thinking and must be an integer between 0 and INT32_MAX");
+        }
+        budget = value.get<int32_t>();
+    }
     if (body.contains("model") && (!body.at("model").is_string() || body.at("model").get<std::string>().empty())) {
         throw std::invalid_argument("model must be a non-empty string");
     }
@@ -186,7 +199,8 @@ server_jev_request server_jev_parse(const json & body, const server_chat_params 
         common_chat_msg message;
         message.role = "user";
         message.content = tmpl.render(json {
-            {"state", state}, {"state_json", state_json}, {"options", options},
+            {"state", state}, {"state_json", state_json}, {"options", options}, {"thinking", thinking},
+            {"reasoning_budget_tokens", thinking ? budget : 0},
             {"question", {
                 {"type", question.type}, {"instructions", question.instructions}, {"criteria", question.criteria},
                 {"instructions_json", question.instructions.dump()}, {"criteria_json", question.criteria.dump()},
@@ -196,15 +210,56 @@ server_jev_request server_jev_parse(const json & body, const server_chat_params 
         inputs.messages.push_back(std::move(message));
         inputs.use_jinja = chat.use_jinja;
         inputs.enable_thinking = false;
+        inputs.force_pure_content = thinking;
         inputs.chat_template_kwargs = chat.chat_template_kwargs;
         inputs.chat_template_kwargs["enable_thinking"] = "false";
         inputs.now = now;
-        const auto rendered = common_chat_templates_apply(chat.tmpls.get(), inputs);
-        auto tokens = common_tokenize(vocab, rendered.prompt, true, true);
-        // Append the verified answer prefix as tokens so label tokenization cannot merge with the chat template.
-        tokens.insert(tokens.end(), labels.prefix.begin(), labels.prefix.end());
-
+        const std::string marker = "__jeva_analysis_content__";
+        if (thinking) {
+            common_chat_msg assistant;
+            assistant.role = "assistant";
+            assistant.content = marker;
+            inputs.messages.push_back(std::move(assistant));
+            // A following turn prevents templates from treating this content as a reasoning prefill.
+            common_chat_msg next_user;
+            next_user.role = "user";
+            next_user.content = ".";
+            inputs.messages.push_back(std::move(next_user));
+            inputs.add_generation_prompt = false;
+        }
         server_task task(SERVER_TASK_TYPE_JEV);
+        auto rendered = common_chat_templates_apply(chat.tmpls.get(), inputs);
+        if (thinking) {
+            // Locate ordinary assistant content without assuming a complete generation header.
+            const auto pos = rendered.prompt.rfind(marker);
+            if (pos == std::string::npos) {
+                throw std::invalid_argument("The chat template cannot render assistant content for analysis");
+            }
+            rendered.prompt.resize(pos);
+        }
+        auto tokens = common_tokenize(vocab, rendered.prompt, true, true);
+        if (thinking) {
+            const auto prefix = common_tokenize(vocab, tmpl.params.value("thinking_prefix", std::string("Analysis:\n")), false, false);
+            if (prefix.empty() || labels.prefix.empty()) {
+                throw std::invalid_argument("Thinking requires non-empty analysis and answer boundaries");
+            }
+            tokens.insert(tokens.end(), prefix.begin(), prefix.end());
+            task.jev_thinking = true;
+            task.params.sampling = sampling;
+            auto & params = task.params.sampling;
+            params.grammar = {};
+            params.grammar_lazy = false;
+            params.backend_sampling = false;
+            params.generation_prompt.clear();
+            params.reasoning_budget_start.clear();
+            params.reasoning_budget_end = {labels.prefix};
+            params.reasoning_budget_forced = labels.prefix;
+            params.reasoning_budget_tokens = budget;
+            params.reasoning_budget_prefilled = true;
+        } else {
+            // Append the verified answer prefix as tokens so label tokenization cannot merge with the chat template.
+            tokens.insert(tokens.end(), labels.prefix.begin(), labels.prefix.end());
+        }
         task.tokens = server_tokens(tokens, false);
         task.candidate_tokens.assign(labels.tokens.begin(), labels.tokens.begin() + question.choices.size());
         request.tasks.push_back(std::move(task));
